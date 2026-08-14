@@ -175,7 +175,12 @@ module.exports = class GoFileUpload {
             }
 
             const position = Data.load('GoFileUpload', 'linkPosition') || 'after';
-            const downloadLinks = merged.map(result => `\n[${result.name}](${result.downloadPage})`).join('');
+            let downloadLinks = merged.map(result => `\n[${result.name}](${result.downloadPage})`).join('').trim();
+            if (position === 'after') {
+                downloadLinks = '\n' + downloadLinks;
+            } else {
+                downloadLinks = downloadLinks + '\n';
+            }
             const maxMessageLength = UserAttributesModule.Ay.canUseIncreasedMessageLength(CrazyModule.default.getCurrentUser());
             const currentContentLength = envelope.message.content?.length || 0;
             const remainingLength = maxMessageLength - currentContentLength;
