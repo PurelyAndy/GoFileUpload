@@ -33,18 +33,6 @@ const inFlightUploadIds = new Set();
 
 const attachmentsToUploadByNonce = new Map();
 
-function interceptDispatch(e) {
-    if (e.type === 'UPLOAD_ATTACHMENT_REMOVE_FILE') {
-        removeId(e.id);
-    } else if (e.type === 'UPLOAD_ATTACHMENT_REMOVE_FILES') {
-        for (const id of e.attachmentIds) {
-            removeId(id);
-        }
-    }
-
-    return false;
-}
-
 function removeId(uniqueId) {
     const files = uniqueIdToBigAndDummy.get(uniqueId);
     if (!files) return false;
@@ -57,10 +45,19 @@ function removeId(uniqueId) {
     inFlightUploadIds.delete(uniqueId);
 }
 
-module.exports = class GoFileUpload {
-    constructor(meta) {
+function interceptDispatch(e) {
+    if (e.type === 'UPLOAD_ATTACHMENT_REMOVE_FILE') {
+        removeId(e.id);
+    } else if (e.type === 'UPLOAD_ATTACHMENT_REMOVE_FILES') {
+        for (const id of e.attachmentIds) {
+            removeId(id);
+        }
     }
 
+    return false;
+}
+
+module.exports = class GoFileUpload {
     start() {
         MessageStoreDispatcher.addInterceptor(interceptDispatch);
         if (Data.load('GoFileUpload', 'uploads') == undefined) {
@@ -72,15 +69,19 @@ module.exports = class GoFileUpload {
 
         Patcher.before('GoFileUpload', CheckFilesModule, 'R', (_, args, orig) => {
             args[0] = Array.from(args[0]);
+
             const maxFileSize = OtherMaxFileSizeThingyModule.Jy(
                 OtherMaxFileSizeThingyModule.R8({ location: 'web.filesExceedUploadLimits' }),
                 GetMaxFileSizeInGuildModule.o2(args[1].guild_id)
             );
+
             for (let i = 0; i < args[0].length; i++) {
                 const currentFile = args[0][i];
+
                 if (currentFile.size > maxFileSize) {
                     const dummy = new File(['dummy'], currentFile.name, { type: currentFile.type });
                     args[0][i] = dummy;
+
                     dummyToBigFile.set(dummy, currentFile);
                     bigFileToDummy.set(currentFile, dummy);
                 }
@@ -130,6 +131,7 @@ module.exports = class GoFileUpload {
         Patcher.before('GoFileUpload', MessageActions, '_sendMessage', (_, args, orig) => {
             const extraInfo = args[2];
             const uploads = extraInfo?.attachmentsToUpload;
+
             if (uploads?.length > 0 && extraInfo.nonce != null) {
                 attachmentsToUploadByNonce.set(extraInfo.nonce, uploads);
             }
@@ -175,12 +177,14 @@ module.exports = class GoFileUpload {
             }
 
             const position = Data.load('GoFileUpload', 'linkPosition') || 'after';
+
             let downloadLinks = merged.map(result => `\n[${result.name}](${result.downloadPage})`).join('').trim();
             if (position === 'after') {
                 downloadLinks = '\n' + downloadLinks;
             } else {
                 downloadLinks = downloadLinks + '\n';
             }
+
             const maxMessageLength = UserAttributesModule.Ay.canUseIncreasedMessageLength(CrazyModule.default.getCurrentUser());
             const currentContentLength = envelope.message.content?.length || 0;
             const remainingLength = maxMessageLength - currentContentLength;
@@ -189,6 +193,7 @@ module.exports = class GoFileUpload {
             if (linksLength > remainingLength) {
                 const truncatedContent = envelope.message.content?.slice(0, maxMessageLength - linksLength) || '';
                 const cutContent = envelope.message.content?.slice(maxMessageLength - linksLength) || '';
+
                 envelope.message.content = position === 'after'
                     ? truncatedContent + downloadLinks
                     : downloadLinks + truncatedContent;
@@ -279,7 +284,9 @@ function SettingsPanel() {
             }
         }
         `),
+
         React.createElement('h2', null, 'Settings'),
+
         React.createElement('p', null, 'Download links are placed at the:'),
         React.createElement(Select, {
             options: [
@@ -294,7 +301,9 @@ function SettingsPanel() {
             serialize: (value) => value,
             isSelected: (value) => value === linkPosition
         }),
+
         React.createElement('h2', null, 'Uploads'),
+
         Object.keys(uploads).map((folderId) => (
             React.createElement('div', { key: folderId, className: 'folder-container' },
                 React.createElement('h3', null,
@@ -454,13 +463,16 @@ async function uploadFile(file, folderId, onProgress) {
 async function performUpload(files, depth, onProgress) {
     const failure = [{ name: '`failed`', downloadPage: 'failed' }];
     depth = depth || 0;
+
     if (depth > 2) {
         alert('Failed to upload files after multiple attempts.');
         goFileGuest = {};
         goFileAccount = {};
         return failure;
     }
+
     depth++;
+
     if (!goFileGuest.token) {
         try {
             await makeGoFileGuest();
@@ -471,6 +483,7 @@ async function performUpload(files, depth, onProgress) {
             return failure;
         }
     }
+
     const allUploads = Data.load('GoFileUpload', 'uploads') || {};
 
     let folderResponse;
@@ -490,6 +503,7 @@ async function performUpload(files, depth, onProgress) {
     for (const file of files) {
         const formatStringOpen = file.isSpoilered ? '||`' : '`';
         const formatStringClose = file.isSpoilered ? '`||' : '`';
+
         try {
             const uploadResponse = await uploadFile(file, folderId, onProgress);
             allUploads[folderId].files.push({ name: file.name, id: uploadResponse.data.id, associatedToken: goFileGuest.token });
