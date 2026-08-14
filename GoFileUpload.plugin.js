@@ -1,0 +1,522 @@
+/**
+ * @name GoFileUpload
+ * @author PurelyAndy
+ * @description Uploads files larger than the limit to GoFile and appends the links to your message
+ * @version 1.0.0
+ * @authorId 702958966308601957
+ * @authorLink https://github.com/PurelyAndy
+ * @source https://github.com/PurelyAndy/GoFileUpload
+ * @runAt idle
+ */
+
+const { Webpack, Patcher, Data, React } = BdApi;
+const MessageActions = Webpack.getByKeys('jumpToMessage', '_sendMessage');
+const CloudUploader = Webpack.getByPrototypeKeys('uploadFileToCloud', { searchExports: true });
+const CheckFilesModule = Webpack.getBySource('Unexpected mismatch between files and file metadata');
+const MessageStoreDispatcher = Webpack.Stores.MessageStore._dispatcher;
+const MessageQueue = Webpack.getByKeys('handleSend');
+const GetMaxFileSizeInGuildModule = Webpack.getByKeys('VE', 'bB');
+const OtherMaxFileSizeThingyModule = Webpack.getByKeys('Jy', 'R8');
+const NitroAndNonNitroMaxMessageLengthModule = Webpack.getByKeys('CS1', 'uvi');
+const UserAttributesModule = Webpack.getByKeys('XN', 'Ay');
+const CrazyModule = Webpack.getByKeys('ASSISTANT_WUMPUS_VOICE_USER');
+const Select = Webpack.getByStrings('selectionMode:"single",onSelectionChange:', "isSelected:", {
+    searchExports: true
+});
+
+const dummyToBigFile = new Map();
+const bigFileToDummy = new Map();
+const uniqueIdToBigAndDummy = new Map();
+
+const goFileResultByUploadId = new Map();
+const inFlightUploadIds = new Set();
+
+const attachmentsToUploadByNonce = new Map();
+
+function interceptDispatch(e) {
+    if (e.type === 'UPLOAD_ATTACHMENT_REMOVE_FILE') {
+        removeId(e.id);
+    } else if (e.type === 'UPLOAD_ATTACHMENT_REMOVE_FILES') {
+        for (const id of e.attachmentIds) {
+            removeId(id);
+        }
+    }
+
+    return false;
+}
+
+function removeId(uniqueId) {
+    const files = uniqueIdToBigAndDummy.get(uniqueId);
+    if (!files) return false;
+    const { originalFile, dummy } = files;
+
+    dummyToBigFile.delete(dummy);
+    bigFileToDummy.delete(originalFile);
+    uniqueIdToBigAndDummy.delete(uniqueId);
+    goFileResultByUploadId.delete(uniqueId);
+    inFlightUploadIds.delete(uniqueId);
+}
+
+module.exports = class GoFileUpload {
+    constructor(meta) {
+    }
+
+    start() {
+        MessageStoreDispatcher.addInterceptor(interceptDispatch);
+        if (Data.load('GoFileUpload', 'uploads') == undefined) {
+            Data.save('GoFileUpload', 'uploads', {});
+        }
+        if (Data.load('GoFileUpload', 'linkPosition') == undefined) {
+            Data.save('GoFileUpload', 'linkPosition', 'after');
+        }
+
+        Patcher.before('GoFileUpload', CheckFilesModule, 'R', (_, args, orig) => {
+            args[0] = Array.from(args[0]);
+            const maxFileSize = OtherMaxFileSizeThingyModule.Jy(
+                OtherMaxFileSizeThingyModule.R8({ location: 'web.filesExceedUploadLimits' }),
+                GetMaxFileSizeInGuildModule.o2(args[1].guild_id)
+            );
+            for (let i = 0; i < args[0].length; i++) {
+                const currentFile = args[0][i];
+                if (currentFile.size > maxFileSize) {
+                    const dummy = new File(['dummy'], currentFile.name, { type: currentFile.type });
+                    args[0][i] = dummy;
+                    dummyToBigFile.set(dummy, currentFile);
+                    bigFileToDummy.set(currentFile, dummy);
+                }
+            }
+        });
+
+        Patcher.instead('GoFileUpload', CloudUploader.prototype, 'upload', (self, args, orig) => {
+            const dummyFile = self.item.file;
+            const originalFile = dummyToBigFile.get(dummyFile);
+
+            if (!originalFile) {
+                return orig.apply(self, args);
+            }
+
+            if (!uniqueIdToBigAndDummy.has(self.id)) {
+                uniqueIdToBigAndDummy.set(self.id, { originalFile, dummy: dummyFile });
+                self.status = 'NOT_STARTED';
+                self.currentSize = originalFile.size;
+                self.emit('progress', 0, originalFile.size);
+                return;
+            }
+
+            if (inFlightUploadIds.has(self.id) || goFileResultByUploadId.has(self.id)) {
+                return;
+            }
+
+            inFlightUploadIds.add(self.id);
+            self.status = 'UPLOADING';
+            performUpload(
+                [{ file: originalFile, name: self.filename ?? originalFile.name, isSpoilered: !!self.spoiler }],
+                0,
+                (loadedBytes, totalBytes) => {
+                    self.loaded = loadedBytes;
+                    self.currentSize = totalBytes;
+                    self.emit('progress', loadedBytes, totalBytes);
+                }
+            ).then(([result]) => {
+                inFlightUploadIds.delete(self.id);
+                goFileResultByUploadId.set(self.id, result);
+                self.handleComplete(self.id);
+            }).catch(err => {
+                inFlightUploadIds.delete(self.id);
+                self.handleError(40005);
+            });
+        });
+
+        Patcher.before('GoFileUpload', MessageActions, '_sendMessage', (_, args, orig) => {
+            const extraInfo = args[2];
+            const uploads = extraInfo?.attachmentsToUpload;
+            if (uploads?.length > 0 && extraInfo.nonce != null) {
+                attachmentsToUploadByNonce.set(extraInfo.nonce, uploads);
+            }
+        });
+
+        Patcher.before('GoFileUpload', MessageQueue, 'enqueue', (self, args, orig) => {
+            const envelope = args[0];
+            const nonce = envelope?.message?.nonce;
+            if (nonce == null) return;
+
+            const uploads = attachmentsToUploadByNonce.get(nonce);
+            attachmentsToUploadByNonce.delete(nonce);
+            if (!uploads?.length) return;
+
+            const attachments = envelope.message.attachments;
+            if (!Array.isArray(attachments) || attachments.length !== uploads.length) return;
+
+            const keepAttachments = [];
+            const goFileForThisSend = [];
+
+            uploads.forEach((cloudUpload, i) => {
+                const result = goFileResultByUploadId.get(cloudUpload.id);
+                if (result) {
+                    goFileForThisSend.push(result);
+                    removeId(cloudUpload.id);
+                } else {
+                    keepAttachments.push(attachments[i]);
+                }
+            });
+
+            if (goFileForThisSend.length === 0) return;
+
+            envelope.message.attachments = keepAttachments;
+
+            const merged = [];
+            for (const result of goFileForThisSend) {
+                const existing = merged.find(r => r.downloadPage === result.downloadPage);
+                if (existing) {
+                    existing.name += ', ' + result.name;
+                } else {
+                    merged.push(result);
+                }
+            }
+
+            const position = Data.load('GoFileUpload', 'linkPosition') || 'after';
+            const downloadLinks = merged.map(result => `\n[${result.name}](${result.downloadPage})`).join('');
+            const maxMessageLength = UserAttributesModule.Ay.canUseIncreasedMessageLength(CrazyModule.default.getCurrentUser());
+            const currentContentLength = envelope.message.content?.length || 0;
+            const remainingLength = maxMessageLength - currentContentLength;
+            const linksLength = downloadLinks.length;
+
+            if (linksLength > remainingLength) {
+                const truncatedContent = envelope.message.content?.slice(0, maxMessageLength - linksLength) || '';
+                const cutContent = envelope.message.content?.slice(maxMessageLength - linksLength) || '';
+                envelope.message.content = position === 'after'
+                    ? truncatedContent + downloadLinks
+                    : downloadLinks + truncatedContent;
+                
+                if (cutContent?.length > 0) {
+                    setTimeout(() => {
+                        MessageActions.sendMessage(
+                            envelope.message.channelId,
+                            { content: cutContent, invalidEmojis: [], tts: false, validNonShortcutEmojis: [] },
+                            undefined,
+                            { alsoForwardToChannelId: undefined, location: 'chat_input' }
+                        );
+                    }, 2000);
+                }
+            } else {
+                envelope.message.content = position === 'after'
+                    ? (envelope.message.content ?? '') + downloadLinks
+                    : downloadLinks + (envelope.message.content ?? '');
+            }
+        });
+    }
+
+    getSettingsPanel() {
+        return React.createElement(SettingsPanel);
+    }
+
+    stop() {
+        Patcher.unpatchAll('GoFileUpload');
+        MessageStoreDispatcher._interceptors.splice(MessageStoreDispatcher._interceptors.indexOf(interceptDispatch), 1);
+        dummyToBigFile.clear();
+        bigFileToDummy.clear();
+        uniqueIdToBigAndDummy.clear();
+        goFileResultByUploadId.clear();
+        inFlightUploadIds.clear();
+        attachmentsToUploadByNonce.clear();
+    }
+};
+
+function SettingsPanel() {
+    const [linkPosition, setLinkPosition] = React.useState(
+        Data.load('GoFileUpload', 'linkPosition') || 'after'
+    );
+    const [uploads, setUploads] = React.useState(
+        () => Data.load('GoFileUpload', 'uploads') || {}
+    );
+
+    return React.createElement('div', { style: { padding: '10px', minHeight: '200px' } },
+        React.createElement('style', null, `
+        .folder-container {
+            background-color: var(--control-secondary-background-default);
+            border-radius: 5px;
+            padding: 10px;
+            margin-bottom: 10px;
+            & h3 {
+                font-size: 1.2em;
+                font-weight: bold;
+                &:has(+ul *) {
+                    margin-bottom: 5px;
+                }
+            }
+        }
+        .file-item {
+            padding: 5px 3px;
+            border-radius: 5px;
+            background-color: var(--control-secondary-background-active);
+        }
+        .file-item:not(:last-child) {
+            margin-bottom: 5px;
+        }
+        .delete-button {
+            background-color: var(--control-critical-primary-background-default);
+            border: none;
+            cursor: pointer;
+            color: white;
+            font-size: 16px;
+            border-radius: 5px;
+            margin: 2px 5px 2px 5px;
+        }
+        .delete-button:hover {
+            background-color: var(--control-critical-primary-background-hover);
+        }
+        h2 {
+            padding-bottom: 5px;
+            font-size: 1.5em;
+            font-weight: 600;
+            &:not(:first-of-type) {
+                margin-top: 20px;
+            }
+        }
+        `),
+        React.createElement('h2', null, 'Settings'),
+        React.createElement('p', null, 'Download links are placed at the:'),
+        React.createElement(Select, {
+            options: [
+                { id: 'after', value: 'after', label: 'End of the message' },
+                { id: 'before', value: 'before', label: 'Start of the message' }
+            ],
+            value: linkPosition,
+            select: (value) => {
+                setLinkPosition(value);
+                Data.save('GoFileUpload', 'linkPosition', value);
+            },
+            serialize: (value) => value,
+            isSelected: (value) => value === linkPosition
+        }),
+        React.createElement('h2', null, 'Uploads'),
+        Object.keys(uploads).map((folderId) => (
+            React.createElement('div', { key: folderId, className: 'folder-container' },
+                React.createElement('h3', null,
+                    React.createElement('button', {
+                        className: 'delete-button', onClick: async (e) => {
+                            const folder = uploads[folderId];
+                            if (!folder) return;
+
+                            try {
+                                await deleteEntry(folderId, folder.associatedToken);
+
+                                setUploads(prev => {
+                                    const next = { ...prev };
+                                    delete next[folderId];
+
+                                    Data.save('GoFileUpload', 'uploads', next);
+                                    return next;
+                                });
+                            } catch (error) {
+                                alert(`Error deleting folder: ${error.message}`);
+                            }
+                        }
+                    },
+                        'Delete'
+                    ),
+                    React.createElement('a', { href: uploads[folderId].downloadPage, target: '_blank', rel: 'noopener noreferrer' }, uploads[folderId].name)
+                ),
+                React.createElement('ul', null,
+                    uploads[folderId].files.map((file) => (
+                        React.createElement('li', { key: file.id, className: 'file-item' },
+                            React.createElement('button', {
+                                className: 'delete-button', onClick: async (e) => {
+                                    const folder = uploads[folderId];
+                                    if (!folder) return;
+
+                                    const foundFile = folder.files.find(f => f.id === file.id);
+                                    if (!foundFile) return;
+
+                                    try {
+                                        await deleteEntry(foundFile.id, foundFile.associatedToken);
+
+                                        setUploads(prev => {
+                                            const next = {
+                                                ...prev,
+                                                [folderId]: {
+                                                    ...prev[folderId],
+                                                    files: prev[folderId].files.filter(
+                                                        f => f.id !== foundFile.id
+                                                    )
+                                                }
+                                            };
+
+                                            Data.save('GoFileUpload', 'uploads', next);
+                                            return next;
+                                        });
+                                    } catch (error) {
+                                        alert(`Error deleting file: ${error.message}`);
+                                    }
+                                }
+                            },
+                                'Delete'
+                            ),
+                            React.createElement('span', null, file.name)
+                        )
+                    ))
+                )
+            )
+        ))
+    );
+}
+
+let goFileGuest = {};
+let goFileAccount = {};
+
+async function makeGoFileGuest() {
+    const response = await fetch('https://api.gofile.io/accounts', { method: 'POST' });
+
+    if (!response.ok) {
+        throw new Error(`Failed to create GoFile guest account: ${response.status} ${response.statusText} ${await response.text()}`);
+    }
+
+    const result = await response.json();
+    goFileGuest = result.data;
+    await getGoFileAccountInfo(goFileGuest.token);
+}
+
+async function getGoFileAccountInfo(token) {
+    const response = await fetch('https://api.gofile.io/accounts/website', {
+        method: 'GET',
+        headers: {
+            'Authorization': `Bearer ${token}`
+        }
+    });
+
+    if (!response.ok) {
+        throw new Error(`Failed to get account info: ${response.status} ${response.statusText} ${await response.text()}`);
+    }
+
+    const result = await response.json();
+    if (/^guest\d+@gofile\.io$/.test(result.data.email)) {
+        result.data.email = result.data.email.replace(/@.*/, '');
+    }
+    goFileAccount = result.data;
+}
+
+async function createFolder() {
+    const response = await fetch('https://api.gofile.io/contents/createfolder', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${goFileGuest.token}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            parentFolderId: goFileAccount.rootFolder,
+            public: true
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error(`Failed to create folder: ${response.status} ${response.statusText} ${await response.text()}`);
+    }
+
+    const result = await response.json();
+    return result;
+}
+
+async function uploadFile(file, folderId, onProgress) {
+    const xhr = new XMLHttpRequest();
+    const formData = new FormData();
+    formData.append('token', goFileGuest.token);
+    formData.append('folderId', folderId);
+    formData.append('file', new File([file.file], file.name, { type: file.file.type }));
+
+    return new Promise((resolve, reject) => {
+        xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable && onProgress) {
+                onProgress(event.loaded, event.total);
+            }
+        };
+
+        xhr.open('POST', 'https://upload.gofile.io/uploadfile', true);
+
+        xhr.onload = () => {
+            if (xhr.status === 200) {
+                resolve(JSON.parse(xhr.responseText));
+            } else {
+                reject(new Error(`Upload failed with status ${xhr.status} ${xhr.statusText} ${xhr.responseText}`));
+            }
+        };
+
+        xhr.onerror = () => reject(new Error('Network error'));
+
+        xhr.send(formData);
+    });
+}
+
+async function performUpload(files, depth, onProgress) {
+    const failure = [{ name: '`failed`', downloadPage: 'failed' }];
+    depth = depth || 0;
+    if (depth > 2) {
+        alert('Failed to upload files after multiple attempts.');
+        goFileGuest = {};
+        goFileAccount = {};
+        return failure;
+    }
+    depth++;
+    if (!goFileGuest.token) {
+        try {
+            await makeGoFileGuest();
+        } catch (error) {
+            alert(`Error creating GoFile guest account: ${error.message}`);
+            goFileGuest = {};
+            goFileAccount = {};
+            return failure;
+        }
+    }
+    const allUploads = Data.load('GoFileUpload', 'uploads') || {};
+
+    let folderResponse;
+    try {
+        folderResponse = await createFolder();
+        allUploads[folderResponse.data.id] = { name: folderResponse.data.name, downloadPage: `https://gofile.io/d/${folderResponse.data.code}`, files: [], associatedToken: goFileGuest.token };
+    } catch (error) {
+        alert(`Error creating folder: ${error.message}`);
+        goFileGuest = {};
+        goFileAccount = {};
+        return await performUpload(files, depth, onProgress);
+    }
+
+    const uploadResults = [];
+    const folderId = folderResponse.data.id;
+
+    for (const file of files) {
+        const formatStringOpen = file.isSpoilered ? '||`' : '`';
+        const formatStringClose = file.isSpoilered ? '`||' : '`';
+        try {
+            const uploadResponse = await uploadFile(file, folderId, onProgress);
+            allUploads[folderId].files.push({ name: file.name, id: uploadResponse.data.id, associatedToken: goFileGuest.token });
+            uploadResults.push({ name: formatStringOpen + file.name + formatStringClose, downloadPage: uploadResponse.data.downloadPage });
+        } catch (error) {
+            alert(`Error uploading file: ${error.message}`);
+            goFileGuest = {};
+            goFileAccount = {};
+            uploadResults.push({ name: formatStringOpen + file.name + formatStringClose, downloadPage: 'failed' });
+        }
+    }
+
+    Data.save('GoFileUpload', 'uploads', allUploads);
+    return uploadResults;
+}
+
+async function deleteEntry(id, token) {
+    const response = await fetch('https://api.gofile.io/contents', {
+        method: 'DELETE',
+        headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            contentsId: id,
+            proof: 'Deletion requested by user'
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error(`Failed to delete entry: ${response.status} ${response.statusText} ${await response.text()}`);
+    }
+
+    return response.json();
+}
