@@ -33,6 +33,9 @@ const inFlightUploadIds = new Set();
 
 const attachmentsToUploadByNonce = new Map();
 
+const cloudUploadIdToNonce = new Map();
+const folderPromiseByBatchKey = new Map();
+
 function removeId(uniqueId) {
     const files = uniqueIdToBigAndDummy.get(uniqueId);
     if (!files) return false;
@@ -43,6 +46,7 @@ function removeId(uniqueId) {
     uniqueIdToBigAndDummy.delete(uniqueId);
     goFileResultByUploadId.delete(uniqueId);
     inFlightUploadIds.delete(uniqueId);
+    cloudUploadIdToNonce.delete(uniqueId);
 }
 
 function interceptDispatch(e) {
@@ -108,11 +112,13 @@ module.exports = class GoFileUpload {
                 return;
             }
 
+            const batchKey = cloudUploadIdToNonce.get(self.id) ?? self.id;
+
             inFlightUploadIds.add(self.id);
             self.status = 'UPLOADING';
             performUpload(
                 [{ file: originalFile, name: self.filename ?? originalFile.name, isSpoilered: !!self.spoiler }],
-                0,
+                batchKey,
                 (loadedBytes, totalBytes) => {
                     self.loaded = loadedBytes;
                     self.currentSize = totalBytes;
@@ -134,6 +140,9 @@ module.exports = class GoFileUpload {
 
             if (uploads?.length > 0 && extraInfo.nonce != null) {
                 attachmentsToUploadByNonce.set(extraInfo.nonce, uploads);
+                for (const upload of uploads) {
+                    cloudUploadIdToNonce.set(upload.id, extraInfo.nonce);
+                }
             }
         });
 
@@ -144,7 +153,12 @@ module.exports = class GoFileUpload {
 
             const uploads = attachmentsToUploadByNonce.get(nonce);
             attachmentsToUploadByNonce.delete(nonce);
+            folderPromiseByBatchKey.delete(nonce);
             if (!uploads?.length) return;
+
+            for (const upload of uploads) {
+                cloudUploadIdToNonce.delete(upload.id);
+            }
 
             const attachments = envelope.message.attachments;
             if (!Array.isArray(attachments) || attachments.length !== uploads.length) return;
@@ -185,7 +199,9 @@ module.exports = class GoFileUpload {
                 downloadLinks = downloadLinks + '\n';
             }
 
-            const maxMessageLength = UserAttributesModule.Ay.canUseIncreasedMessageLength(CrazyModule.default.getCurrentUser());
+            const maxMessageLength = UserAttributesModule.Ay.canUseIncreasedMessageLength(CrazyModule.default.getCurrentUser())
+                ? NitroAndNonNitroMaxMessageLengthModule.CS1
+                : NitroAndNonNitroMaxMessageLengthModule.uvi;
             const currentContentLength = envelope.message.content?.length || 0;
             const remainingLength = maxMessageLength - currentContentLength;
             const linksLength = downloadLinks.length;
@@ -197,7 +213,7 @@ module.exports = class GoFileUpload {
                 envelope.message.content = position === 'after'
                     ? truncatedContent + downloadLinks
                     : downloadLinks + truncatedContent;
-                
+
                 if (cutContent?.length > 0) {
                     setTimeout(() => {
                         MessageActions.sendMessage(
@@ -229,6 +245,8 @@ module.exports = class GoFileUpload {
         goFileResultByUploadId.clear();
         inFlightUploadIds.clear();
         attachmentsToUploadByNonce.clear();
+        cloudUploadIdToNonce.clear();
+        folderPromiseByBatchKey.clear();
     }
 };
 
@@ -430,10 +448,49 @@ async function createFolder() {
     return result;
 }
 
-async function uploadFile(file, folderId, onProgress) {
+async function getSharedFolder(batchKey) {
+    let promise = folderPromiseByBatchKey.get(batchKey);
+    if (!promise) {
+        promise = createSharedFolder();
+        folderPromiseByBatchKey.set(batchKey, promise);
+        promise.catch(() => {
+            if (folderPromiseByBatchKey.get(batchKey) === promise) {
+                folderPromiseByBatchKey.delete(batchKey);
+            }
+        });
+    }
+    return promise;
+}
+
+async function createSharedFolder(depth = 0) {
+    if (depth > 2) {
+        throw new Error('Failed to create GoFile folder after multiple attempts.');
+    }
+
+    try {
+        if (!goFileGuest.token) {
+            await makeGoFileGuest();
+        }
+
+        const folderResponse = await createFolder();
+        const downloadPage = `https://gofile.io/d/${folderResponse.data.code}`;
+
+        const allUploads = Data.load('GoFileUpload', 'uploads') || {};
+        allUploads[folderResponse.data.id] = { name: folderResponse.data.name, downloadPage, files: [], associatedToken: goFileGuest.token };
+        Data.save('GoFileUpload', 'uploads', allUploads);
+
+        return { folderId: folderResponse.data.id, downloadPage, token: goFileGuest.token };
+    } catch (error) {
+        goFileGuest = {};
+        goFileAccount = {};
+        return createSharedFolder(depth + 1);
+    }
+}
+
+async function uploadFile(file, folderId, token, onProgress) {
     const xhr = new XMLHttpRequest();
     const formData = new FormData();
-    formData.append('token', goFileGuest.token);
+    formData.append('token', token);
     formData.append('folderId', folderId);
     formData.append('file', new File([file.file], file.name, { type: file.file.type }));
 
@@ -460,58 +517,34 @@ async function uploadFile(file, folderId, onProgress) {
     });
 }
 
-async function performUpload(files, depth, onProgress) {
+async function performUpload(files, batchKey, onProgress) {
     const failure = [{ name: '`failed`', downloadPage: 'failed' }];
-    depth = depth || 0;
 
-    if (depth > 2) {
-        alert('Failed to upload files after multiple attempts.');
-        goFileGuest = {};
-        goFileAccount = {};
+    let folder;
+    try {
+        folder = await getSharedFolder(batchKey);
+    } catch (error) {
+        alert(`Error creating folder: ${error.message}`);
         return failure;
     }
 
-    depth++;
-
-    if (!goFileGuest.token) {
-        try {
-            await makeGoFileGuest();
-        } catch (error) {
-            alert(`Error creating GoFile guest account: ${error.message}`);
-            goFileGuest = {};
-            goFileAccount = {};
-            return failure;
-        }
-    }
-
     const allUploads = Data.load('GoFileUpload', 'uploads') || {};
-
-    let folderResponse;
-    try {
-        folderResponse = await createFolder();
-        allUploads[folderResponse.data.id] = { name: folderResponse.data.name, downloadPage: `https://gofile.io/d/${folderResponse.data.code}`, files: [], associatedToken: goFileGuest.token };
-    } catch (error) {
-        alert(`Error creating folder: ${error.message}`);
-        goFileGuest = {};
-        goFileAccount = {};
-        return await performUpload(files, depth, onProgress);
-    }
-
     const uploadResults = [];
-    const folderId = folderResponse.data.id;
 
     for (const file of files) {
         const formatStringOpen = file.isSpoilered ? '||`' : '`';
         const formatStringClose = file.isSpoilered ? '`||' : '`';
 
         try {
-            const uploadResponse = await uploadFile(file, folderId, onProgress);
-            allUploads[folderId].files.push({ name: file.name, id: uploadResponse.data.id, associatedToken: goFileGuest.token });
-            uploadResults.push({ name: formatStringOpen + file.name + formatStringClose, downloadPage: uploadResponse.data.downloadPage });
+            const uploadResponse = await uploadFile(file, folder.folderId, folder.token, onProgress);
+
+            const entry = allUploads[folder.folderId] ?? { name: folder.folderId, downloadPage: folder.downloadPage, files: [], associatedToken: folder.token };
+            entry.files.push({ name: file.name, id: uploadResponse.data.id, associatedToken: folder.token });
+            allUploads[folder.folderId] = entry;
+
+            uploadResults.push({ name: formatStringOpen + file.name + formatStringClose, downloadPage: uploadResponse.data.downloadPage ?? folder.downloadPage });
         } catch (error) {
             alert(`Error uploading file: ${error.message}`);
-            goFileGuest = {};
-            goFileAccount = {};
             uploadResults.push({ name: formatStringOpen + file.name + formatStringClose, downloadPage: 'failed' });
         }
     }
