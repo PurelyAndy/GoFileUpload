@@ -13,7 +13,6 @@ const { Webpack, Patcher, Data, React } = BdApi;
 const Filters = Webpack.Filters;
 const MessageActions = Webpack.getByKeys('jumpToMessage', '_sendMessage');
 const CloudUploader = Webpack.getByPrototypeKeys('uploadFileToCloud', { searchExports: true });
-//const CheckFilesModule = Webpack.getBySource('Unexpected mismatch between files and file metadata');
 const [CheckFilesModule, openModalIfFileExceedsSizeKey] = Webpack.getWithKey(
     Filters.byStrings('Unexpected mismatch between files and file metadata'),
     { target: Webpack.getModule(Webpack.Filters.bySource('Unexpected mismatch between files and file metadata')) }
@@ -278,23 +277,36 @@ function SettingsPanel() {
         .folder-container {
             background-color: var(--control-secondary-background-default);
             border-radius: 5px;
-            padding: 10px;
-            margin-bottom: 10px;
+            padding: 5px;
+            margin-bottom: 5px;
             & h3 {
                 font-size: 1.2em;
                 font-weight: bold;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                margin-left: 3px;
                 &:has(+ul *) {
                     margin-bottom: 5px;
+                }
+                & .delete-button {
+                    margin: 0 5px 0 0;
                 }
             }
         }
         .file-item {
-            padding: 5px 3px;
-            border-radius: 5px;
-            background-color: var(--control-secondary-background-active);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 3px 0;
+            border-radius: 3px;
+            background-color: var(--control-secondary-background-hover);
+            & span {
+                margin-left: 5px;
+            }
         }
         .file-item:not(:last-child) {
-            margin-bottom: 5px;
+            margin-bottom: 3px;
         }
         .delete-button {
             background-color: var(--control-critical-primary-background-default);
@@ -302,19 +314,22 @@ function SettingsPanel() {
             cursor: pointer;
             color: white;
             font-size: 16px;
-            border-radius: 5px;
+            border-radius: 3px;
             margin: 2px 5px 2px 5px;
         }
         .delete-button:hover {
             background-color: var(--control-critical-primary-background-hover);
         }
         h2 {
-            padding-bottom: 5px;
+            padding-bottom: 10px;
             font-size: 1.5em;
             font-weight: 600;
             &:not(:first-of-type) {
                 margin-top: 20px;
             }
+        }
+        p {
+            padding-bottom: 5px;
         }
         `),
 
@@ -340,6 +355,7 @@ function SettingsPanel() {
         Object.keys(uploads).map((folderId) => (
             React.createElement('div', { key: folderId, className: 'folder-container' },
                 React.createElement('h3', null,
+                    React.createElement('a', { href: uploads[folderId].downloadPage, target: '_blank', rel: 'noopener noreferrer' }, uploads[folderId].name),
                     React.createElement('button', {
                         className: 'delete-button', onClick: async (e) => {
                             const folder = uploads[folderId];
@@ -361,12 +377,12 @@ function SettingsPanel() {
                         }
                     },
                         'Delete'
-                    ),
-                    React.createElement('a', { href: uploads[folderId].downloadPage, target: '_blank', rel: 'noopener noreferrer' }, uploads[folderId].name)
+                    )
                 ),
                 React.createElement('ul', null,
                     uploads[folderId].files.map((file) => (
                         React.createElement('li', { key: file.id, className: 'file-item' },
+                            React.createElement('span', null, file.name),
                             React.createElement('button', {
                                 className: 'delete-button', onClick: async (e) => {
                                     const folder = uploads[folderId];
@@ -398,8 +414,7 @@ function SettingsPanel() {
                                 }
                             },
                                 'Delete'
-                            ),
-                            React.createElement('span', null, file.name)
+                            )
                         )
                     ))
                 )
