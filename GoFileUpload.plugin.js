@@ -10,13 +10,30 @@
  */
 
 const { Webpack, Patcher, Data, React } = BdApi;
+const Filters = Webpack.Filters;
 const MessageActions = Webpack.getByKeys('jumpToMessage', '_sendMessage');
 const CloudUploader = Webpack.getByPrototypeKeys('uploadFileToCloud', { searchExports: true });
-const CheckFilesModule = Webpack.getBySource('Unexpected mismatch between files and file metadata');
+//const CheckFilesModule = Webpack.getBySource('Unexpected mismatch between files and file metadata');
+const [CheckFilesModule, openModalIfFileExceedsSizeKey] = Webpack.getWithKey(
+    Filters.byStrings('Unexpected mismatch between files and file metadata'),
+    { target: Webpack.getModule(Webpack.Filters.bySource('Unexpected mismatch between files and file metadata')) }
+)
+const GetMaxFileSizeInGuildModule = Webpack.getByKeys('VE', 'bB');
+const OtherMaxFileSizeThingyModule = Webpack.getByKeys('Jy', 'R8');
+const { getGuildMaxFileSize } = Webpack.getMangled(
+    Filters.bySource('location:"getGuildMaxFileSize"'),
+    { func: Filters.byStrings('location:"getGuildMaxFileSize"') }
+);
+const { getBiggestSize, getUserMaxFileSize } = Webpack.getMangled(
+    Filters.bySource('Math.max(1048576'),
+    {
+        getBiggestSize: Filters.byStrings('Math.max(1048576'),
+        getUserMaxFileSize: Filters.byStrings('let{location')
+    }
+);
 const MessageStoreDispatcher = Webpack.Stores.MessageStore._dispatcher;
 const MessageQueue = Webpack.getByKeys('handleSend');
-const UserStore = Webpack.getStore("UserStore");
-const GuildStore = Webpack.getStore("GuildStore");
+const UserStore = Webpack.getStore('UserStore');
 const Select = Webpack.getByStrings('selectionMode:"single",onSelectionChange:', "isSelected:", {
     searchExports: true
 });
@@ -68,22 +85,13 @@ module.exports = class GoFileUpload {
             Data.save('GoFileUpload', 'linkPosition', 'after');
         }
 
-        Patcher.before('GoFileUpload', CheckFilesModule, 'R', (_, args, orig) => {
+        Patcher.before('GoFileUpload', CheckFilesModule, openModalIfFileExceedsSizeKey, (_, args, orig) => {
             args[0] = Array.from(args[0]);
 
-            const features = GuildStore.getGuild(args[1].guild_id)?.premiumFeatures?.features || [];
-            const guildMax =
-                    features.includes('MAX_FILE_SIZE_50_MB') ? 50
-                  : features.includes('MAX_FILE_SIZE_100_MB') ? 100
-                  : features.includes('MAX_FILE_SIZE_250_MB') ? 250
-                  : 20;
-            const premiumType = UserStore.getCurrentUser().premiumType;
-            const userMax = (premiumType === null || premiumType === 0) ? 20
-                          : (premiumType === 3    || premiumType === 1) ? 50
-                           : premiumType === 2                          ? 500
-                           : alert(`Unknown premium type: ${premiumType}`) || 20;
-
-            const maxFileSize = Math.max(guildMax, userMax) * 1024 * 1024;
+            const maxFileSize = getBiggestSize(
+                getUserMaxFileSize({ location: 'web.filesExceedUploadLimits' }),
+                getGuildMaxFileSize(args[1].guild_id)
+            );
 
             for (let i = 0; i < args[0].length; i++) {
                 const currentFile = args[0][i];
