@@ -15,11 +15,8 @@ const CloudUploader = Webpack.getByPrototypeKeys('uploadFileToCloud', { searchEx
 const CheckFilesModule = Webpack.getBySource('Unexpected mismatch between files and file metadata');
 const MessageStoreDispatcher = Webpack.Stores.MessageStore._dispatcher;
 const MessageQueue = Webpack.getByKeys('handleSend');
-const GetMaxFileSizeInGuildModule = Webpack.getByKeys('VE', 'bB');
-const OtherMaxFileSizeThingyModule = Webpack.getByKeys('Jy', 'R8');
-const NitroAndNonNitroMaxMessageLengthModule = Webpack.getByKeys('CS1', 'uvi');
-const UserAttributesModule = Webpack.getByKeys('XN', 'Ay');
-const CrazyModule = Webpack.getByKeys('ASSISTANT_WUMPUS_VOICE_USER');
+const UserStore = Webpack.getStore("UserStore");
+const GuildStore = Webpack.getStore("GuildStore");
 const Select = Webpack.getByStrings('selectionMode:"single",onSelectionChange:', "isSelected:", {
     searchExports: true
 });
@@ -74,10 +71,19 @@ module.exports = class GoFileUpload {
         Patcher.before('GoFileUpload', CheckFilesModule, 'R', (_, args, orig) => {
             args[0] = Array.from(args[0]);
 
-            const maxFileSize = OtherMaxFileSizeThingyModule.Jy(
-                OtherMaxFileSizeThingyModule.R8({ location: 'web.filesExceedUploadLimits' }),
-                GetMaxFileSizeInGuildModule.o2(args[1].guild_id)
-            );
+            const features = GuildStore.getGuild(args[1].guild_id)?.premiumFeatures?.features || [];
+            const guildMax =
+                    features.includes('MAX_FILE_SIZE_50_MB') ? 50
+                  : features.includes('MAX_FILE_SIZE_100_MB') ? 100
+                  : features.includes('MAX_FILE_SIZE_250_MB') ? 250
+                  : 20;
+            const premiumType = UserStore.getCurrentUser().premiumType;
+            const userMax = (premiumType === null || premiumType === 0) ? 20
+                          : (premiumType === 3    || premiumType === 1) ? 50
+                           : premiumType === 2                          ? 500
+                           : alert(`Unknown premium type: ${premiumType}`) || 20;
+
+            const maxFileSize = Math.max(guildMax, userMax) * 1024 * 1024;
 
             for (let i = 0; i < args[0].length; i++) {
                 const currentFile = args[0][i];
@@ -199,9 +205,10 @@ module.exports = class GoFileUpload {
                 downloadLinks = downloadLinks + '\n';
             }
 
-            const maxMessageLength = UserAttributesModule.Ay.canUseIncreasedMessageLength(CrazyModule.default.getCurrentUser())
-                ? NitroAndNonNitroMaxMessageLengthModule.CS1
-                : NitroAndNonNitroMaxMessageLengthModule.uvi;
+            const premiumType = UserStore.getCurrentUser().premiumType;
+            const maxMessageLength = (premiumType === null || premiumType === 0)
+                ? 2000
+                : 4000;
             const currentContentLength = envelope.message.content?.length || 0;
             const remainingLength = maxMessageLength - currentContentLength;
             const linksLength = downloadLinks.length;
