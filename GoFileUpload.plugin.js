@@ -17,8 +17,6 @@ const [CheckFilesModule, openModalIfFileExceedsSizeKey] = Webpack.getWithKey(
     Filters.byStrings('Unexpected mismatch between files and file metadata'),
     { target: Webpack.getModule(Webpack.Filters.bySource('Unexpected mismatch between files and file metadata')) }
 )
-const GetMaxFileSizeInGuildModule = Webpack.getByKeys('VE', 'bB');
-const OtherMaxFileSizeThingyModule = Webpack.getByKeys('Jy', 'R8');
 const { getGuildMaxFileSize } = Webpack.getMangled(
     Filters.bySource('location:"getGuildMaxFileSize"'),
     { func: Filters.byStrings('location:"getGuildMaxFileSize"') }
