@@ -19,7 +19,7 @@ const [CheckFilesModule, openModalIfFileExceedsSizeKey] = Webpack.getWithKey(
 )
 const { getGuildMaxFileSize } = Webpack.getMangled(
     Filters.bySource('location:"getGuildMaxFileSize"'),
-    { func: Filters.byStrings('location:"getGuildMaxFileSize"') }
+    { getGuildMaxFileSize: Filters.byStrings('location:"getGuildMaxFileSize"') }
 );
 const { getBiggestSize, getUserMaxFileSize } = Webpack.getMangled(
     Filters.bySource('Math.max(1048576'),
