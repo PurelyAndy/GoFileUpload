@@ -85,10 +85,20 @@ module.exports = class GoFileUpload {
         Patcher.before('GoFileUpload', CheckFilesModule, openModalIfFileExceedsSizeKey, (_, args, orig) => {
             args[0] = Array.from(args[0]);
 
+            const oldGetCurrentUser = UserStore.getCurrentUser;
+            const oldStaffFlag = oldGetCurrentUser().flags & 1;
+            UserStore.getCurrentUser = () => {
+                const user = oldGetCurrentUser();
+                user.flags &= ~1;
+                return user;
+            };
+            const currentUser = UserStore.getCurrentUser();
             const maxFileSize = getBiggestSize(
                 getUserMaxFileSize({ location: 'web.filesExceedUploadLimits' }),
                 getGuildMaxFileSize(args[1].guild_id)
             );
+            UserStore.getCurrentUser = oldGetCurrentUser;
+            currentUser.flags |= oldStaffFlag;
 
             for (let i = 0; i < args[0].length; i++) {
                 const currentFile = args[0][i];
