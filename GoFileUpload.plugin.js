@@ -21,17 +21,17 @@ const { getGuildMaxFileSize } = Webpack.getMangled(
     Filters.bySource('location:"getGuildMaxFileSize"'),
     { getGuildMaxFileSize: Filters.byStrings('location:"getGuildMaxFileSize"') }
 );
-const { getBiggestSize, getUserMaxFileSize } = Webpack.getMangled(
+const { resolveThresholdBytes, getMaxFileSizeExperimentConfig } = Webpack.getMangled(
     Filters.bySource('Math.max(1048576'),
     {
-        getBiggestSize: Filters.byStrings('Math.max(1048576'),
-        getUserMaxFileSize: Filters.byStrings('let{location')
+        resolveThresholdBytes: Filters.byStrings('Math.max(1048576'),
+        getMaxFileSizeExperimentConfig: Filters.byStrings('let{location')
     }
 );
 const MessageStoreDispatcher = Webpack.Stores.MessageStore._dispatcher;
 const MessageQueue = Webpack.getByKeys('handleSend');
 const UserStore = Webpack.getStore('UserStore');
-const Select = Webpack.getByStrings('selectionMode:"single",onSelectionChange:', "isSelected:", {
+const Select = Webpack.getByStrings('selectionMode:"single",onSelectionChange:', 'isSelected:', {
     searchExports: true
 });
 
@@ -41,11 +41,13 @@ const uniqueIdToBigAndDummy = new Map();
 
 const goFileResultByUploadId = new Map();
 const inFlightUploadIds = new Set();
+const inFlightUploadRequests = new Map();
 
 const attachmentsToUploadByNonce = new Map();
 
 const cloudUploadIdToNonce = new Map();
 const folderPromiseByBatchKey = new Map();
+const canceledBatchKeys = new Set();
 
 function removeId(uniqueId) {
     const files = uniqueIdToBigAndDummy.get(uniqueId);
@@ -57,6 +59,7 @@ function removeId(uniqueId) {
     uniqueIdToBigAndDummy.delete(uniqueId);
     goFileResultByUploadId.delete(uniqueId);
     inFlightUploadIds.delete(uniqueId);
+    inFlightUploadRequests.delete(uniqueId);
     cloudUploadIdToNonce.delete(uniqueId);
 }
 
@@ -93,8 +96,8 @@ module.exports = class GoFileUpload {
                 return user;
             };
             const currentUser = UserStore.getCurrentUser();
-            const maxFileSize = getBiggestSize(
-                getUserMaxFileSize({ location: 'web.filesExceedUploadLimits' }),
+            const maxFileSize = resolveThresholdBytes(
+                getMaxFileSizeExperimentConfig({ location: 'web.filesExceedUploadLimits' }),
                 getGuildMaxFileSize(args[1].guild_id)
             );
             UserStore.getCurrentUser = oldGetCurrentUser;
@@ -138,21 +141,36 @@ module.exports = class GoFileUpload {
             inFlightUploadIds.add(self.id);
             self.status = 'UPLOADING';
             performUpload(
-                [{ file: originalFile, name: self.filename ?? originalFile.name, isSpoilered: !!self.spoiler }],
+                { file: originalFile, name: self.filename ?? originalFile.name, isSpoilered: !!self.spoiler },
                 batchKey,
                 (loadedBytes, totalBytes) => {
                     self.loaded = loadedBytes;
                     self.currentSize = totalBytes;
                     self.emit('progress', loadedBytes, totalBytes);
-                }
+                },
+                self.id
             ).then(([result]) => {
                 inFlightUploadIds.delete(self.id);
+                inFlightUploadRequests.delete(self.id);
                 goFileResultByUploadId.set(self.id, result);
                 self.handleComplete(self.id);
             }).catch(err => {
+                console.error('Error uploading file to GoFile:', err);
                 inFlightUploadIds.delete(self.id);
+                inFlightUploadRequests.delete(self.id);
                 self.handleError(40005);
             });
+        });
+
+        Patcher.instead('GoFileUpload', CloudUploader.prototype, '_cancel', (self, args, orig) => {
+            if (!inFlightUploadIds.has(self.id)) {
+                return orig.apply(self, args);
+            }
+
+            inFlightUploadRequests.get(self.id)?.abort();
+            removeId(self.id);
+
+            return orig.apply(self, args);
         });
 
         Patcher.before('GoFileUpload', MessageActions, '_sendMessage', (_, args, orig) => {
@@ -163,6 +181,10 @@ module.exports = class GoFileUpload {
                 attachmentsToUploadByNonce.set(extraInfo.nonce, uploads);
                 for (const upload of uploads) {
                     cloudUploadIdToNonce.set(upload.id, extraInfo.nonce);
+
+                    if (dummyToBigFile.get(upload.item.file)) {
+                        upload.currentSize = 5;
+                    }
                 }
             }
         });
@@ -175,6 +197,7 @@ module.exports = class GoFileUpload {
             const uploads = attachmentsToUploadByNonce.get(nonce);
             attachmentsToUploadByNonce.delete(nonce);
             folderPromiseByBatchKey.delete(nonce);
+            canceledBatchKeys.delete(nonce);
             if (!uploads?.length) return;
 
             for (const upload of uploads) {
@@ -255,7 +278,7 @@ module.exports = class GoFileUpload {
     }
 
     getSettingsPanel() {
-        return React.createElement(SettingsPanel);
+        return SettingsPanel;
     }
 
     stop() {
@@ -266,9 +289,11 @@ module.exports = class GoFileUpload {
         uniqueIdToBigAndDummy.clear();
         goFileResultByUploadId.clear();
         inFlightUploadIds.clear();
+        inFlightUploadRequests.clear();
         attachmentsToUploadByNonce.clear();
         cloudUploadIdToNonce.clear();
         folderPromiseByBatchKey.clear();
+        canceledBatchKeys.clear();
     }
 };
 
@@ -525,8 +550,9 @@ async function createSharedFolder(depth = 0) {
     }
 }
 
-async function uploadFile(file, folderId, token, onProgress) {
+async function uploadFile(file, folderId, token, onProgress, cloudUploadId) {
     const xhr = new XMLHttpRequest();
+    inFlightUploadRequests.set(cloudUploadId, xhr);
     const formData = new FormData();
     formData.append('token', token);
     formData.append('folderId', folderId);
@@ -550,12 +576,13 @@ async function uploadFile(file, folderId, token, onProgress) {
         };
 
         xhr.onerror = () => reject(new Error('Network error'));
+        xhr.onabort = () => reject(new Error('Upload canceled'));
 
         xhr.send(formData);
     });
 }
 
-async function performUpload(files, batchKey, onProgress) {
+async function performUpload(file, batchKey, onProgress, cloudUploadId) {
     const failure = [{ name: '`failed`', downloadPage: 'failed' }];
 
     let folder;
@@ -569,19 +596,26 @@ async function performUpload(files, batchKey, onProgress) {
     const allUploads = Data.load('GoFileUpload', 'uploads') || {};
     const uploadResults = [];
 
-    for (const file of files) {
-        const formatStringOpen = file.isSpoilered ? '||`' : '`';
-        const formatStringClose = file.isSpoilered ? '`||' : '`';
+    const formatStringOpen = file.isSpoilered ? '||`' : '`';
+    const formatStringClose = file.isSpoilered ? '`||' : '`';
 
-        try {
-            const uploadResponse = await uploadFile(file, folder.folderId, folder.token, onProgress);
+    try {
+        const uploadResponse = await uploadFile(file, folder.folderId, folder.token, onProgress, cloudUploadId);
 
-            const entry = allUploads[folder.folderId] ?? { name: folder.folderId, downloadPage: folder.downloadPage, files: [], associatedToken: folder.token };
-            entry.files.push({ name: file.name, id: uploadResponse.data.id, associatedToken: folder.token });
-            allUploads[folder.folderId] = entry;
+        const entry = allUploads[folder.folderId] ?? { name: folder.folderId, downloadPage: folder.downloadPage, files: [], associatedToken: folder.token };
+        entry.files.push({ name: file.name, id: uploadResponse.data.id, associatedToken: folder.token });
+        allUploads[folder.folderId] = entry;
 
-            uploadResults.push({ name: formatStringOpen + file.name + formatStringClose, downloadPage: uploadResponse.data.downloadPage ?? folder.downloadPage });
-        } catch (error) {
+        uploadResults.push({ name: formatStringOpen + file.name + formatStringClose, downloadPage: uploadResponse.data.downloadPage ?? folder.downloadPage });
+    } catch (error) {
+        if (error.message === 'Upload canceled') {
+            uploadResults.push({ name: formatStringOpen + file.name + formatStringClose, downloadPage: 'canceled' });
+            if (!canceledBatchKeys.has(batchKey)) {
+                await deleteEntry(folder.folderId, folder.token);
+                delete allUploads[folder.folderId];
+                canceledBatchKeys.add(batchKey);
+            }
+        } else {
             alert(`Error uploading file: ${error.message}`);
             uploadResults.push({ name: formatStringOpen + file.name + formatStringClose, downloadPage: 'failed' });
         }
