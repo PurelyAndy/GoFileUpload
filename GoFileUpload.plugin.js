@@ -92,6 +92,7 @@ module.exports = class GoFileUpload {
             const oldStaffFlag = oldGetCurrentUser().flags & 1;
             UserStore.getCurrentUser = () => {
                 const user = oldGetCurrentUser();
+                if (!user) return user;
                 user.flags &= ~1;
                 return user;
             };
