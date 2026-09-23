@@ -21,10 +21,6 @@ const { getGuildMaxFileSize } = Webpack.getMangled(
     Filters.bySource('location:"getGuildMaxFileSize"'),
     { getGuildMaxFileSize: Filters.byStrings('location:"getGuildMaxFileSize"') }
 );
-const { clampFileSize } = Webpack.getMangled(
-    Filters.bySource('Math.max(0x1400000'),
-    { clampFileSize: Filters.byStrings('Math.max(0x1400000') }
-);
 const MessageStoreDispatcher = Webpack.Stores.MessageStore._dispatcher;
 const MessageQueue = Webpack.getByKeys('handleSend');
 const UserStore = Webpack.getStore('UserStore');
@@ -94,7 +90,7 @@ module.exports = class GoFileUpload {
                 return user;
             };
             const currentUser = UserStore.getCurrentUser();
-            const maxFileSize = clampFileSize(getGuildMaxFileSize(args[1].guild_id));
+            const maxFileSize = Math.max(0x1400000, getGuildMaxFileSize(args[1].guild_id));
             UserStore.getCurrentUser = oldGetCurrentUser;
             currentUser.flags |= oldStaffFlag;
 
