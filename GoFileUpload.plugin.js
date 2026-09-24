@@ -11,12 +11,14 @@
 
 const { Webpack, Patcher, Data, React } = BdApi;
 const Filters = Webpack.Filters;
+const rce = React.createElement;
+
 const MessageActions = Webpack.getByKeys('jumpToMessage', '_sendMessage');
 const CloudUploader = Webpack.getByPrototypeKeys('uploadFileToCloud', { searchExports: true });
 const [CheckFilesModule, openModalIfFileExceedsSizeKey] = Webpack.getWithKey(
     Filters.byStrings('Unexpected mismatch between files and file metadata'),
     { target: Webpack.getModule(Webpack.Filters.bySource('Unexpected mismatch between files and file metadata')) }
-)
+);
 const { getGuildMaxFileSize } = Webpack.getMangled(
     Filters.bySource('location:"getGuildMaxFileSize"'),
     { getGuildMaxFileSize: Filters.byStrings('location:"getGuildMaxFileSize"') }
@@ -288,6 +290,67 @@ module.exports = class GoFileUpload {
     }
 };
 
+const settingsStyles =
+`
+.folder-container {
+    background-color: var(--control-secondary-background-default);
+    border-radius: 5px;
+    padding: 5px;
+    margin-bottom: 5px;
+    & h3 {
+        font-size: 1.2em;
+        font-weight: bold;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-left: 3px;
+        &:has(+ul *) {
+            margin-bottom: 5px;
+        }
+        & .delete-button {
+            margin: 0 5px 0 0;
+        }
+    }
+}
+.file-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 3px 0;
+    border-radius: 3px;
+    background-color: var(--control-secondary-background-hover);
+    & span {
+        margin-left: 5px;
+    }
+}
+.file-item:not(:last-child) {
+    margin-bottom: 3px;
+}
+.delete-button {
+    background-color: var(--control-critical-primary-background-default);
+    border: none;
+    cursor: pointer;
+    color: white;
+    font-size: 16px;
+    border-radius: 3px;
+    margin: 2px 5px 2px 5px;
+}
+.delete-button:hover {
+    background-color: var(--control-critical-primary-background-hover);
+}
+h2 {
+    padding-bottom: 10px;
+    font-size: 1.5em;
+    font-weight: 600;
+    &:not(:first-of-type) {
+        margin-top: 20px;
+    }
+}
+p {
+    padding-bottom: 5px;
+}
+`;
+
 function SettingsPanel() {
     const [linkPosition, setLinkPosition] = React.useState(
         Data.load('GoFileUpload', 'linkPosition') || 'after'
@@ -296,71 +359,13 @@ function SettingsPanel() {
         () => Data.load('GoFileUpload', 'uploads') || {}
     );
 
-    return React.createElement('div', { style: { padding: '10px', minHeight: '200px' } },
-        React.createElement('style', null, `
-        .folder-container {
-            background-color: var(--control-secondary-background-default);
-            border-radius: 5px;
-            padding: 5px;
-            margin-bottom: 5px;
-            & h3 {
-                font-size: 1.2em;
-                font-weight: bold;
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                margin-left: 3px;
-                &:has(+ul *) {
-                    margin-bottom: 5px;
-                }
-                & .delete-button {
-                    margin: 0 5px 0 0;
-                }
-            }
-        }
-        .file-item {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 3px 0;
-            border-radius: 3px;
-            background-color: var(--control-secondary-background-hover);
-            & span {
-                margin-left: 5px;
-            }
-        }
-        .file-item:not(:last-child) {
-            margin-bottom: 3px;
-        }
-        .delete-button {
-            background-color: var(--control-critical-primary-background-default);
-            border: none;
-            cursor: pointer;
-            color: white;
-            font-size: 16px;
-            border-radius: 3px;
-            margin: 2px 5px 2px 5px;
-        }
-        .delete-button:hover {
-            background-color: var(--control-critical-primary-background-hover);
-        }
-        h2 {
-            padding-bottom: 10px;
-            font-size: 1.5em;
-            font-weight: 600;
-            &:not(:first-of-type) {
-                margin-top: 20px;
-            }
-        }
-        p {
-            padding-bottom: 5px;
-        }
-        `),
+    return rce('div', { style: { padding: '10px', minHeight: '200px' } },
+        rce('style', null, settingsStyles),
 
-        React.createElement('h2', null, 'Settings'),
+        rce('h2', null, 'Settings'),
 
-        React.createElement('p', null, 'Download links are placed at the:'),
-        React.createElement(Select, {
+        rce('p', null, 'Download links are placed at the:'),
+        rce(Select, {
             options: [
                 { id: 'after', value: 'after', label: 'End of the message' },
                 { id: 'before', value: 'before', label: 'Start of the message' }
@@ -374,14 +379,14 @@ function SettingsPanel() {
             isSelected: (value) => value === linkPosition
         }),
 
-        React.createElement('h2', null, 'Uploads'),
+        rce('h2', null, 'Uploads'),
 
         Object.keys(uploads).map((folderId) => (
-            React.createElement('div', { key: folderId, className: 'folder-container' },
-                React.createElement('h3', null,
-                    React.createElement('a', { href: uploads[folderId].downloadPage, target: '_blank', rel: 'noopener noreferrer' }, uploads[folderId].name),
-                    React.createElement('button', {
-                        className: 'delete-button', onClick: async (e) => {
+            rce('div', { key: folderId, className: 'folder-container' },
+                rce('h3', null,
+                    rce('a', { href: uploads[folderId].downloadPage, target: '_blank', rel: 'noopener noreferrer' }, uploads[folderId].name),
+                    rce('button', {
+                        className: 'delete-button bd-button-filled', onClick: async (e) => {
                             const folder = uploads[folderId];
                             if (!folder) return;
 
@@ -403,11 +408,11 @@ function SettingsPanel() {
                         'Delete'
                     )
                 ),
-                React.createElement('ul', null,
+                rce('ul', null,
                     uploads[folderId].files.map((file) => (
-                        React.createElement('li', { key: file.id, className: 'file-item' },
-                            React.createElement('span', null, file.name),
-                            React.createElement('button', {
+                        rce('li', { key: file.id, className: 'file-item' },
+                            rce('span', null, file.name),
+                            rce('button', {
                                 className: 'delete-button', onClick: async (e) => {
                                     const folder = uploads[folderId];
                                     if (!folder) return;
